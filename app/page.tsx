@@ -1,27 +1,42 @@
 "use client";
-import { useEffect, useState, useCallback } from 'react';
+import { Suspense, useEffect, useState, useCallback } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { createClient } from '@supabase/supabase-js';
 import RoomView from './components/RoomView';
 import ReservationModal from './components/ReservationModal';
+import FloorPlanCanvas from './components/FloorPlanCanvas';
+import LocalPreview from './components/LocalPreview';
 
-const supabase = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!);
+const COMMON_ROOM_SLUG = 'common';
 
-export default function OpenRoom() {
+function roomSlug(room: any): string | null {
+  if (room.grid_x === 0 && room.grid_y === 0) return COMMON_ROOM_SLUG;
+  return room.registry_id ?? null;
+}
+
+const supabase = process.env.NEXT_PUBLIC_SUPABASE_URL
+  ? createClient(process.env.NEXT_PUBLIC_SUPABASE_URL, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!)
+  : null;
+
+function OpenRoomInner() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const activeSlug = searchParams.get('room');
+
   const [rooms, setRooms] = useState<any[]>([]);
-  const [activeRoom, setActiveRoom] = useState<any>(null);
   const [myId, setMyId] = useState<string>('');
   const [isHelpOpen, setIsHelpOpen] = useState(false);
   const [reserving, setReserving] = useState<{ x: number; y: number } | null>(null);
   const [successRoom, setSuccessRoom] = useState<{ room: any; roomId: string } | null>(null);
 
   const refreshRooms = useCallback(async () => {
-    const { data } = await supabase.from('rooms').select('*');
+    const { data } = await supabase!.from('rooms').select('*').neq('status', 'deleted');
     let roomList = data || [];
     
     // Check for the center piece: The Common Room
     const commonRoom = roomList.find(r => r.grid_x === 0 && r.grid_y === 0);
     if (!commonRoom) {
-      const { data: newHome } = await supabase.from('rooms').insert([{
+      const { data: newHome } = await supabase!.from('rooms').insert([{
         name: 'Common Room',
         owner_name: 'Building Admin',
         owner_id: 'public',
@@ -40,7 +55,7 @@ export default function OpenRoom() {
 
     refreshRooms();
 
-    const channel = supabase.channel('floor-sync')
+    const channel = supabase!.channel('floor-sync')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'rooms' }, (payload) => {
         if (payload.eventType === 'UPDATE') {
           setRooms(prev => prev.map(r => r.id === payload.new.id ? payload.new : r));
@@ -50,13 +65,25 @@ export default function OpenRoom() {
       })
       .subscribe();
 
-    return () => { supabase.removeChannel(channel); };
+    return () => { supabase!.removeChannel(channel); };
   }, [refreshRooms]);
 
-  const handleBack = () => {
-    setActiveRoom(null);
-    refreshRooms(); 
+  const openRoom = (room: any) => {
+    const slug = roomSlug(room);
+    if (!slug) return;
+    router.push(`/?room=${encodeURIComponent(slug)}`);
   };
+
+  const handleBack = () => {
+    router.push('/');
+    refreshRooms();
+  };
+
+  const activeRoom = activeSlug
+    ? (activeSlug === COMMON_ROOM_SLUG
+        ? rooms.find(r => r.grid_x === 0 && r.grid_y === 0)
+        : rooms.find(r => r.registry_id === activeSlug))
+    : null;
 
   if (activeRoom) {
     const isWelcomeRoom = activeRoom.grid_x === 0 && activeRoom.grid_y === 0;
@@ -108,8 +135,8 @@ export default function OpenRoom() {
   };
 
   return (
-    <main className="min-h-screen w-screen bg-stone-100 flex flex-col items-center justify-center p-20 overflow-auto">
-      <div className="mb-8 text-center">
+    <main className="w-screen bg-stone-100 flex flex-col overflow-hidden" style={{ height: '100dvh' }}>
+      <div className="pt-6 pb-4 text-center shrink-0">
         <h1 className="text-slate-900 text-3xl font-black tracking-tighter uppercase">Open Room</h1>
         <div className="flex items-center justify-center gap-2">
           <p className="text-slate-400 text-sm font-medium">Infinite Floor Plan</p>
@@ -122,9 +149,10 @@ export default function OpenRoom() {
         </div>
       </div>
 
-      <div 
-        className="grid gap-4" 
-        style={{ gridTemplateColumns: `repeat(${xRange.length}, minmax(0, 1fr))` }}
+      <FloorPlanCanvas>
+      <div
+        className="grid gap-4 p-8"
+        style={{ gridTemplateColumns: `repeat(${xRange.length}, 7rem)` }}
       >
         {yRange.map(y => xRange.map(x => {
           const room = rooms.find(r => r.grid_x === x && r.grid_y === y);
@@ -133,7 +161,7 @@ export default function OpenRoom() {
             return (
               <button
                 key={`${x}-${y}`}
-                onClick={() => setActiveRoom(room)}
+                onClick={() => openRoom(room)}
                 className={`w-28 h-28 rounded-2xl shadow-md flex flex-col items-center justify-center transition-all hover:scale-105 border-2 ${
                   isCommon ? 'bg-white border-amber-400 text-slate-900' :
                   room.owner_id === myId ? 'bg-indigo-600 border-indigo-400 text-white' : 'bg-sky-100 border-sky-300 text-slate-700'
@@ -147,7 +175,7 @@ export default function OpenRoom() {
 
           const isAdjacent = Array.from(occupied).some(coord => {
             const [ox, oy] = coord.split(',').map(Number);
-            return Math.abs(ox - x) <= 1 && Math.abs(oy - y) <= 1;
+            return (Math.abs(ox - x) + Math.abs(oy - y)) === 1;
           });
 
           return isAdjacent ? (
@@ -157,6 +185,7 @@ export default function OpenRoom() {
           ) : <div key={`${x}-${y}`} className="w-28 h-28" />;
         }))}
       </div>
+      </FloorPlanCanvas>
 
       {/* OPEN ROOM GUIDE MODAL */}
       {isHelpOpen && (
@@ -231,13 +260,13 @@ export default function OpenRoom() {
             onClick={e => e.stopPropagation()}
           >
             <div className="text-4xl mb-4">🎉</div>
-            <h2 className="text-slate-900 text-2xl font-black tracking-tight mb-1">Room Reserved!</h2>
+            <h2 className="text-slate-900 text-2xl font-black tracking-tight mb-1">Congratulations!</h2>
             <p className="text-slate-500 text-sm mb-6 leading-relaxed">
-              This is your room ID. <strong className="text-slate-900">Save it now</strong> — you'll need it to name your folder in the repo. A GitHub issue has also been opened to track your reservation.
+              You've reserved your room. Here's your room name — your AI will need it.
             </p>
 
             <div className="bg-indigo-50 border-2 border-indigo-200 rounded-2xl p-5 mb-6 text-center">
-              <p className="text-[10px] uppercase font-black text-indigo-400 tracking-widest mb-2">Your Room ID</p>
+              <p className="text-[10px] uppercase font-black text-indigo-400 tracking-widest mb-2">Your Room Name</p>
               <p className="text-2xl font-black text-indigo-700 font-mono tracking-tight mb-3">{successRoom.roomId}</p>
               <button
                 onClick={() => navigator.clipboard.writeText(successRoom.roomId)}
@@ -247,12 +276,19 @@ export default function OpenRoom() {
               </button>
             </div>
 
-            <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 mb-6 text-sm text-slate-600 leading-relaxed space-y-2">
-              <p className="font-black text-slate-900 text-xs uppercase tracking-widest mb-3">Next steps</p>
-              <p>1. Fork <code className="bg-slate-100 px-1 rounded text-xs">github.com/alyssafuward/open-room-open-source</code></p>
-              <p>2. Copy <code className="bg-slate-100 px-1 rounded text-xs">registry/_template/</code> → <code className="bg-slate-100 px-1 rounded text-xs">registry/{successRoom.roomId}/</code></p>
-              <p>3. Add your background image and edit <code className="bg-slate-100 px-1 rounded text-xs">config.json</code></p>
-              <p>4. Open a Pull Request</p>
+            <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 mb-6 space-y-3">
+              <p className="font-black text-slate-900 text-xs uppercase tracking-widest">Now, open this with your AI:</p>
+              <a
+                href="https://github.com/alyssafuward/open-room-open-source"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="block text-xs font-mono text-indigo-500 hover:text-indigo-700 underline underline-offset-4 break-all"
+              >
+                github.com/alyssafuward/open-room-open-source
+              </a>
+              <p className="text-xs text-slate-600 leading-relaxed">
+                Tell it: <span className="font-semibold text-slate-800">"I just reserved a room. Help me create it."</span> It'll walk you through everything — forking the repo, setting up your files, and opening a pull request.
+              </p>
             </div>
 
             <button
@@ -265,5 +301,16 @@ export default function OpenRoom() {
         </div>
       )}
     </main>
+  );
+}
+
+export default function OpenRoom() {
+  if (!process.env.NEXT_PUBLIC_SUPABASE_URL) {
+    return <LocalPreview />;
+  }
+  return (
+    <Suspense fallback={null}>
+      <OpenRoomInner />
+    </Suspense>
   );
 }
